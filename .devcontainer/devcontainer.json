@@ -1,0 +1,48 @@
+{
+	"name": "Django sqlite object storage",
+	"dockerComposeFile": [
+		"../docker-compose.yml"
+	],
+	"service": "app",
+	"workspaceFolder": "/workspaces",
+	// Set *default* container specific settings.json values on container create.
+	"customizations": {
+		"vscode": {
+			"settings": {
+				"python.defaultInterpreterPath": ".venv/bin/python",
+				"python.linting.enabled": true,
+				"editor.formatOnSave": true,
+				"python.analysis.typeCheckingMode": "basic",
+				"[python]": {
+					"editor.defaultFormatter": "charliermarsh.ruff",
+					"editor.formatOnSave": true,
+					"editor.codeActionsOnSave": {
+						"source.fixAll": true,
+						"source.organizeImports": true
+					}
+				},
+				"ruff.path": [
+					"${containerWorkspaceFolder}/.venv/bin/ruff"
+				]
+			},
+			"extensions": [
+				"ms-python.vscode-pylance",
+				"visualstudioexptteam.vscodeintellicode",
+				"tamasfe.even-better-toml",
+				"redhat.vscode-yaml",
+				"eamodio.gitlens",
+				"streetsidesoftware.code-spell-checker",
+				"batisteo.vscode-django",
+				"charliermarsh.ruff"
+			]
+		}
+	},
+	"features": {
+		"ghcr.io/devcontainers/features/common-utils:2": {},
+		"ghcr.io/devcontainers/features/docker-outside-of-docker:1": {},
+		"ghcr.io/devcontainers-contrib/features/neovim-apt-get:1": {},
+		"ghcr.io/devcontainers/features/git:1": {},
+		"ghcr.io/dhoeric/features/hadolint:1": {},
+		"ghcr.io/guiyomh/features/vim:0": {}
+	}
+}
