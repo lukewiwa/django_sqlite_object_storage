@@ -1,35 +1,35 @@
-[tool.poetry]
+[project]
 name = "django-sqlite-object-storage"
-version = "0.1.0"
+version = "0.1.1"
 description = "Store an sqlite database in object storage"
-authors = ["lukewiwa <luke.wiwa@gmail.com>"]
-license = "MIT"
+authors = [{ name = "lukewiwa", email = "luke.wiwa@gmail.com" }]
+license = { file = "LICENSE" }
 readme = "README.md"
-packages = [{ include = "django_sqlite_object_storage" }]
 classifiers = [
   "Programming Language :: Python :: 3",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
+  "Framework :: Django",
 ]
-homepage = "https://github.com/lukewiwa/django_sqlite_object_storage"
+requires-python = ">=3.9"
+dependencies = ["django>=4.2", "boto3>=1.28.79"]
 
-[tool.poetry.dependencies]
-python = "^3.9"
-Django = ">=4.2"
-boto3 = "^1.28.79"
-
-[tool.poetry.group.dev.dependencies]
-tox = "^4.11.3"
-black = "^23.10.0"
-pyright = "^1.1.332"
-django-types = "^0.19.1"
-ruff = "^0.1.0"
-ipython = "^8.17.2"
+[project.urls]
+repository = "https://github.com/lukewiwa/django_sqlite_object_storage"
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
-
+requires = ["hatchling"]
+build-backend = "hatchling.build"
 
 [tool.pyright]
 typeCheckingMode = "basic"
+
+[tool.uv]
+dev-dependencies = [
+  "tox>=4.18.0",
+  "ruff>=0.6.1",
+  "pyright>=1.1.377",
+  "django-types>=0.19.1",
+  "ipython>=8.18.1",
+  "tox-uv>=1.11.2",
+]

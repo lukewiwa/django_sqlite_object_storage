@@ -14,16 +14,15 @@ services:
       - SQLITE_OBJECT_STORAGE_ENDPOINT_URL=http://localhost:9000 # local mock S3 container
       - SQLITE_OBJECT_STORAGE_SIGNATURE_VERSION=s3v4
 
-      # CDK deployment
-      - AWS_ACCESS_KEY_ID=${AWS_CDK_ACCESS_KEY_ID}
-      - AWS_SECRET_ACCESS_KEY=${AWS_CDK_SECRET_ACCESS_KEY}
-      - AWS_DEFAULT_REGION=${AWS_DEFAULT_REGION:-ap-southeast-2}
+      # publishing
+      - TWINE_USERNAME=${TWINE_USERNAME}
+      - TWINE_PASSWORD=${TWINE_PASSWORD}
 
     volumes:
       - .:/workspaces
     working_dir: /workspaces
-    entrypoint: /workspaces/.devcontainer/entrypoint.sh
-    command: sleep infinity
+    entrypoint: /bin/bash
+    command: -c "sleep infinity"
     ports:
       - ${S3_CONSOLE_PORT:-9090}:9090
 

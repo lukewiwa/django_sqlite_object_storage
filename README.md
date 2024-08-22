@@ -11,9 +11,10 @@ DATABASES = {
     "default": {
         "ENGINE": "django_sqlite_object_storage",
         "NAME": Path("/tmp", "db.sqlite3"),
-        "SQLITE_OBJECT_STORAGE_BUCKET_NAME": "bucektname",
+        "SQLITE_OBJECT_STORAGE_BUCKET_NAME": "bucketname",
         "SQLITE_OBJECT_STORAGE_ACCESS_KEY_ID": "key",
         "SQLITE_OBJECT_STORAGE_ACCESS_SECRET": "secret",
+        "SQLITE_OBJECT_STORAGE_ENDPOINT_URL": "http://localhost:9000",  # Optional
     }
 }
 ```
