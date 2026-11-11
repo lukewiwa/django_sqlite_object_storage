@@ -1,6 +1,6 @@
 [project]
 name = "django-sqlite-object-storage"
-version = "0.1.1"
+version = "0.2.0"
 description = "Store an sqlite database in object storage"
 authors = [{ name = "lukewiwa", email = "luke.wiwa@gmail.com" }]
 license = { file = "LICENSE" }
@@ -10,8 +10,11 @@ classifiers = [
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Framework :: Django",
+  "Framework :: Django :: 4.2",
+  "Framework :: Django :: 5.2",
+  "Framework :: Django :: 6.0",
 ]
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = ["django>=4.2", "boto3>=1.28.79"]
 
 [project.urls]
@@ -24,12 +27,16 @@ build-backend = "hatchling.build"
 [tool.pyright]
 typeCheckingMode = "basic"
 
-[tool.uv]
-dev-dependencies = [
+[dependency-groups]
+dev = [
   "tox>=4.18.0",
   "ruff>=0.6.1",
   "pyright>=1.1.377",
   "django-types>=0.19.1",
   "ipython>=8.18.1",
   "tox-uv>=1.11.2",
+  "moto[s3]>=5",
 ]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B", "SIM"]
