@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 import logging
 import os
 import tempfile
@@ -14,6 +15,7 @@ import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
 from django.db.backends.sqlite3 import base
+from django.db.utils import DatabaseError
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +31,18 @@ RACY_WINDOW_NS = 2_000_000_000
 # fresh copy from object storage these belong to the old file and must go, or
 # SQLite will happily replay them over the new one.
 SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
+
+
+STATE_SUFFIX = ".s3state"
+
+CONFLICT_ERROR_CODES = ("PreconditionFailed", "ConditionalRequestConflict")
+
+
+class ObjectStorageConflict(DatabaseError):
+    """
+    The remote database changed since we last synced, so our upload was
+    refused rather than overwriting someone else's writes.
+    """
 
 
 def _md5_stream(stream: BinaryIO, sink: BinaryIO | None = None) -> str:
@@ -57,6 +71,8 @@ class DatabaseWrapper(base.DatabaseWrapper):
         super().__init__(*args, **kwargs)
         # md5 of the local file at the point we last knew it matched the remote.
         self._synced_md5: str | None = None
+        # ETag of the remote object at that point, None if it didn't exist.
+        self._remote_etag: str | None = None
         # (stat key, time hashed, md5) so we don't rehash an unchanged file.
         self._md5_cache: tuple[tuple[int, int, int, int], int, str] | None = None
 
@@ -67,6 +83,11 @@ class DatabaseWrapper(base.DatabaseWrapper):
     @property
     def database_remote_path(self) -> str:
         return self.database_local_path.name
+
+    @property
+    def state_path(self) -> Path:
+        path = self.database_local_path
+        return path.with_name(f"{path.name}{STATE_SUFFIX}")
 
     @cached_property
     def bucket_name(self) -> str:
@@ -134,22 +155,55 @@ class DatabaseWrapper(base.DatabaseWrapper):
         if self.object_storage_enabled:
             self.push_to_object_storage()
 
+    def _load_state(self) -> dict | None:
+        try:
+            return json.loads(self.state_path.read_text())
+        except (FileNotFoundError, ValueError):
+            return None
+
+    def _save_state(self) -> None:
+        """
+        Persist which remote version the local file corresponds to, so a fresh
+        process can do a conditional GET on the real ETag and knows what to
+        expect when it uploads.
+        """
+        state = {"etag": self._remote_etag, "md5": self._synced_md5}
+        path = self.state_path
+        tmp = path.with_name(f".{path.name}.tmp")
+        tmp.write_text(json.dumps(state))
+        os.replace(tmp, path)
+
     def pull_from_object_storage(self) -> None:
-        """Replace the local database with the remote one if they differ."""
+        """
+        Replace the local database with the remote one if the remote changed
+        since we last synced.
+        """
         path = self.database_local_path
+        state = self._load_state()
         local_md5 = self.local_md5()
         kwargs = {"Bucket": self.bucket_name, "Key": self.database_remote_path}
         if local_md5 is not None:
-            # ETag for a single part, non-KMS upload is the quoted md5 of the body.
-            kwargs["IfNoneMatch"] = f'"{local_md5}"'
+            if state and state.get("etag"):
+                kwargs["IfNoneMatch"] = state["etag"]
+            else:
+                # No record of the remote ETag, fall back to guessing. For a
+                # single part, non-KMS upload it's the quoted md5 of the body.
+                kwargs["IfNoneMatch"] = f'"{local_md5}"'
 
         try:
             response = self.object_storage_client.get_object(**kwargs)
         except ClientError as e:
             code = e.response.get("Error", {}).get("Code")
             if code in ("304", "NotModified"):
-                logger.info("[DB Connect] %s unchanged (md5:%s)", path, local_md5)
-                self._synced_md5 = local_md5
+                # Remote hasn't moved since we last synced. Keep the local file
+                # even if it has unpushed changes, they'll go up on close.
+                self._remote_etag = kwargs["IfNoneMatch"]
+                if state and state.get("etag") == self._remote_etag:
+                    self._synced_md5 = state.get("md5")
+                else:
+                    self._synced_md5 = local_md5
+                    self._save_state()
+                logger.info("[DB Connect] %s unchanged remotely", path)
                 return
             if code == "NoSuchKey":
                 logger.warning(
@@ -157,9 +211,18 @@ class DatabaseWrapper(base.DatabaseWrapper):
                     self.database_remote_path,
                 )
                 # Remote is empty: whatever is local needs pushing on close.
+                self._remote_etag = None
                 self._synced_md5 = None
+                self._save_state()
                 return
             raise
+
+        if local_md5 is not None and state and local_md5 != state.get("md5"):
+            logger.warning(
+                "[DB Connect] %s has local changes that were never uploaded and the"
+                " remote has since changed. Discarding the local changes.",
+                path,
+            )
 
         # Stream into a temp file next to the target, then atomically swap it in
         # so a failed download never leaves a truncated database behind.
@@ -178,10 +241,15 @@ class DatabaseWrapper(base.DatabaseWrapper):
 
         self._remember_md5(md5, hashed_at_ns)
         self._synced_md5 = md5
+        self._remote_etag = response["ETag"]
+        self._save_state()
         logger.info("[DB Connect] Downloaded %s (md5:%s)", path, md5)
 
     def push_to_object_storage(self) -> None:
-        """Upload the local database if it changed since the last sync."""
+        """
+        Upload the local database if it changed since the last sync, but only if
+        the remote is still the version we started from.
+        """
         path = self.database_local_path
         local_md5 = self.local_md5()
         if local_md5 is None:
@@ -193,13 +261,29 @@ class DatabaseWrapper(base.DatabaseWrapper):
             return
 
         logger.debug("[DB Close] %s changed (md5:%s), uploading", path, local_md5)
-        content_md5 = base64.b64encode(bytes.fromhex(local_md5)).decode()
-        with path.open("rb") as f:
-            self.object_storage_client.put_object(
-                Bucket=self.bucket_name,
-                Key=self.database_remote_path,
-                Body=f,
-                ContentMD5=content_md5,
-            )
+        kwargs = {
+            "Bucket": self.bucket_name,
+            "Key": self.database_remote_path,
+            "ContentMD5": base64.b64encode(bytes.fromhex(local_md5)).decode(),
+        }
+        if self._remote_etag is None:
+            kwargs["IfNoneMatch"] = "*"
+        else:
+            kwargs["IfMatch"] = self._remote_etag
+
+        try:
+            with path.open("rb") as f:
+                response = self.object_storage_client.put_object(Body=f, **kwargs)
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") in CONFLICT_ERROR_CODES:
+                raise ObjectStorageConflict(
+                    f"{self.database_remote_path} was changed by someone else since"
+                    f" it was last synced (expected ETag {self._remote_etag})."
+                    " Local changes were not uploaded."
+                ) from e
+            raise
+
         self._synced_md5 = local_md5
+        self._remote_etag = response["ETag"]
+        self._save_state()
         logger.info("[DB Close] Uploaded %s (md5:%s)", path, local_md5)
