@@ -15,7 +15,7 @@ classifiers = [
   "Framework :: Django :: 6.0",
 ]
 requires-python = ">=3.10"
-dependencies = ["django>=4.2", "boto3>=1.28.79"]
+dependencies = ["django>=4.2", "boto3>=1.35.69"]
 
 [project.urls]
 repository = "https://github.com/lukewiwa/django_sqlite_object_storage"

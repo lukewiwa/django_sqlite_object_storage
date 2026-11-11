@@ -27,10 +27,23 @@ DATABASES = {
 
 The object key is the file name of `NAME`.
 
+## Concurrency
+
+Uploads are conditional (`If-Match` on the ETag we last synced, or
+`If-None-Match: *` when creating). If someone else uploaded in the meantime the
+upload is refused and `ObjectStorageConflict` is raised instead of overwriting
+their writes. The next connection pulls their version.
+
+It's still a single writer design: a conflict means your local changes are
+dropped. Conditional writes just make that loud instead of silent.
+
+Requires an S3 implementation that honours conditional writes. AWS S3 does.
+Some S3 compatible services silently ignore the headers.
+
+Sync state lives next to the database in `<NAME>.s3state`.
+
 ## Caveats
 
-- This is a single writer setup. Two processes writing at once will clobber
-  each other, last close wins.
 - In-memory databases (including Django's default SQLite test database) never
   touch object storage.
 

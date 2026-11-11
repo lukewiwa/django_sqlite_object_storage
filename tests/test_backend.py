@@ -8,6 +8,8 @@ import boto3
 from django.db.utils import ConnectionHandler
 from moto import mock_aws
 
+from django_sqlite_object_storage.base import ObjectStorageConflict
+
 BUCKET = "test-bucket"
 
 
@@ -151,9 +153,12 @@ class ObjectStorageBackendTests(unittest.TestCase):
         ):
             a.connect()
         self.assertEqual(a.database_local_path.read_bytes(), before)
-        self.assertEqual(
-            [p.name for p in a.database_local_path.parent.iterdir()], ["db.sqlite3"]
-        )
+        leftovers = [
+            p.name
+            for p in a.database_local_path.parent.iterdir()
+            if p.name.startswith(".")
+        ]
+        self.assertEqual(leftovers, [])
 
     def test_hash_is_cached_for_untouched_file(self):
         conn = self.make_connection()
@@ -172,3 +177,63 @@ class ObjectStorageBackendTests(unittest.TestCase):
         get = self.spy(conn, "get_object")
         self.write(conn, "hello")
         get.assert_not_called()
+
+    def test_concurrent_writers_conflict_instead_of_clobbering(self):
+        a = self.make_connection("a")
+        b = self.make_connection("b")
+        self.write(a, "seed")
+        a.close()
+
+        a.connect()
+        b.connect()
+        self.write(a, "from a")
+        self.write(b, "from b")
+        a.close()
+        with self.assertRaises(ObjectStorageConflict):
+            b.close()
+
+        # b's write was refused; reconnecting picks up a's version.
+        b.connect()
+        self.assertEqual(self.read(b), ["from a", "seed"])
+
+    def test_concurrent_creation_conflicts(self):
+        a = self.make_connection("a")
+        b = self.make_connection("b")
+        a.connect()
+        b.connect()
+        self.write(a, "from a")
+        self.write(b, "from b")
+        a.close()
+        with self.assertRaises(ObjectStorageConflict):
+            b.close()
+
+    def test_fresh_process_uses_stored_etag(self):
+        conn = self.make_connection()
+        self.write(conn, "hello")
+        conn.close()
+        etag = self.s3.head_object(Bucket=BUCKET, Key="db.sqlite3")["ETag"]
+
+        fresh = self.make_connection()
+        get = self.spy(fresh, "get_object")
+        fresh.connect()
+        self.assertEqual(get.call_args.kwargs["IfNoneMatch"], etag)
+        self.assertEqual(self.read(fresh), ["hello"])
+
+    def test_unpushed_changes_survive_reconnect_if_remote_unchanged(self):
+        conn = self.make_connection()
+        self.write(conn, "one")
+        conn.close()
+
+        self.write(conn, "two")
+        with (
+            mock.patch.object(
+                conn.object_storage_client, "put_object", side_effect=OSError
+            ),
+            self.assertRaises(OSError),
+        ):
+            conn.close()
+
+        fresh = self.make_connection()
+        self.assertEqual(self.read(fresh), ["one", "two"])
+        fresh.close()
+        self.assertEqual(self.remote_body(), fresh.database_local_path.read_bytes())
