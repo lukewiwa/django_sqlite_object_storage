@@ -14,6 +14,8 @@ from typing import BinaryIO
 import boto3
 from botocore.config import Config
 from botocore.exceptions import ClientError
+from django.core.signals import request_finished
+from django.db import connections
 from django.db.backends.sqlite3 import base
 from django.db.utils import DatabaseError
 
@@ -34,6 +36,8 @@ SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
 
 
 STATE_SUFFIX = ".s3state"
+
+SYNC_ATTEMPTS = 3
 
 CONFLICT_ERROR_CODES = ("PreconditionFailed", "ConditionalRequestConflict")
 
@@ -261,10 +265,87 @@ class DatabaseWrapper(base.DatabaseWrapper):
             return
 
         logger.debug("[DB Close] %s changed (md5:%s), uploading", path, local_md5)
+        self._upload(path, local_md5)
+
+    def sync(self) -> bool:
+        """
+        Upload committed changes without closing the connection. Returns True if
+        anything was uploaded.
+
+        Briefly takes SQLite's write lock (readers aren't blocked) while copying
+        the file, so the upload is a consistent snapshot. Does nothing inside a
+        transaction, or if the connection isn't open.
+        """
+        conn = self.connection
+        if (
+            not self.object_storage_enabled
+            or conn is None
+            or self.in_atomic_block
+            or conn.in_transaction
+        ):
+            return False
+
+        path = self.database_local_path
+        wal_path = Path(f"{path}-wal")
+        wal = conn.execute("PRAGMA journal_mode").fetchone()[0].lower() == "wal"
+
+        def wal_is_empty() -> bool:
+            try:
+                return wal_path.stat().st_size == 0
+            except FileNotFoundError:
+                return True
+
+        for _ in range(SYNC_ATTEMPTS):
+            if wal:
+                # Can't checkpoint inside a transaction, so do it first and check
+                # nothing snuck into the WAL once we hold the lock.
+                conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            if self.local_md5() == self._synced_md5 and (not wal or wal_is_empty()):
+                return False
+
+            snapshot = None
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                if not wal or wal_is_empty():
+                    snapshot = self._snapshot(path)
+            finally:
+                conn.execute("ROLLBACK")
+            if snapshot is not None:
+                break
+        else:
+            logger.warning(
+                "[DB Sync] %s kept changing, giving up until the next sync", path
+            )
+            return False
+
+        snapshot_path, md5 = snapshot
+        try:
+            if md5 == self._synced_md5:
+                return False
+            self._upload(snapshot_path, md5)
+        finally:
+            snapshot_path.unlink(missing_ok=True)
+        return True
+
+    def _snapshot(self, path: Path) -> tuple[Path, str]:
+        fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+        try:
+            with os.fdopen(fd, "wb") as tmp, path.open("rb") as src:
+                md5 = _md5_stream(src, sink=tmp)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+        return Path(tmp_name), md5
+
+    def _upload(self, source: Path, md5: str) -> None:
+        """
+        Upload source as the remote database, but only if the remote is still the
+        version we last synced.
+        """
         kwargs = {
             "Bucket": self.bucket_name,
             "Key": self.database_remote_path,
-            "ContentMD5": base64.b64encode(bytes.fromhex(local_md5)).decode(),
+            "ContentMD5": base64.b64encode(bytes.fromhex(md5)).decode(),
         }
         if self._remote_etag is None:
             kwargs["IfNoneMatch"] = "*"
@@ -272,7 +353,7 @@ class DatabaseWrapper(base.DatabaseWrapper):
             kwargs["IfMatch"] = self._remote_etag
 
         try:
-            with path.open("rb") as f:
+            with source.open("rb") as f:
                 response = self.object_storage_client.put_object(Body=f, **kwargs)
         except ClientError as e:
             if e.response.get("Error", {}).get("Code") in CONFLICT_ERROR_CODES:
@@ -283,7 +364,22 @@ class DatabaseWrapper(base.DatabaseWrapper):
                 ) from e
             raise
 
-        self._synced_md5 = local_md5
+        self._synced_md5 = md5
         self._remote_etag = response["ETag"]
         self._save_state()
-        logger.info("[DB Close] Uploaded %s (md5:%s)", path, local_md5)
+        logger.info("[DB Sync] Uploaded %s (md5:%s)", self.database_local_path, md5)
+
+
+def sync_open_connections(**kwargs) -> None:
+    """
+    Push changes at the end of each request for connections Django keeps open
+    (CONN_MAX_AGE > 0). Connections Django closes are pushed on close anyway.
+    """
+    for conn in connections.all(initialized_only=True):  # pyright: ignore[reportCallIssue]
+        if isinstance(conn, DatabaseWrapper):
+            conn.sync()
+
+
+# Connected after django.db's close_old_connections, so connections due to be
+# closed are already closed (and pushed) by the time this runs.
+request_finished.connect(sync_open_connections)

@@ -27,6 +27,24 @@ DATABASES = {
 
 The object key is the file name of `NAME`.
 
+## Persistent connections
+
+With `CONN_MAX_AGE` > 0 Django keeps the connection open between requests, so
+there's no close to hang the upload off. Changes are pushed at the end of every
+request instead (via `request_finished`). Outside a request, call it yourself:
+
+```python
+from django.db import connection
+
+connection.sync()
+```
+
+`sync()` briefly takes SQLite's write lock (readers carry on) while it copies
+the file, then uploads the copy. In WAL mode it checkpoints first. It's a no-op
+inside a transaction or when nothing has changed.
+
+Remote changes are only pulled when a connection is opened.
+
 ## Concurrency
 
 Uploads are conditional (`If-Match` on the ETag we last synced, or
