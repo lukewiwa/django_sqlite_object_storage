@@ -1,10 +1,12 @@
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
 import boto3
+from django.core.signals import request_finished
 from django.db.utils import ConnectionHandler
 from moto import mock_aws
 
@@ -237,3 +239,64 @@ class ObjectStorageBackendTests(unittest.TestCase):
         self.assertEqual(self.read(fresh), ["one", "two"])
         fresh.close()
         self.assertEqual(self.remote_body(), fresh.database_local_path.read_bytes())
+
+    def remote_rows(self):
+        path = self.tmp / "remote.sqlite3"
+        path.write_bytes(self.remote_body())
+        with sqlite3.connect(path) as db:
+            return [r[0] for r in db.execute("SELECT v FROM t ORDER BY v")]
+
+    def test_sync_uploads_without_closing(self):
+        conn = self.make_connection()
+        self.write(conn, "hello")
+        self.assertTrue(conn.sync())
+        self.assertIsNotNone(conn.connection)
+        self.assertEqual(self.remote_rows(), ["hello"])
+
+        # Still usable, and close doesn't upload again.
+        self.write(conn, "again")
+        self.assertTrue(conn.sync())
+        put = self.spy(conn, "put_object")
+        conn.close()
+        put.assert_not_called()
+        self.assertEqual(self.remote_rows(), ["again", "hello"])
+
+    def test_sync_noop_when_unchanged(self):
+        conn = self.make_connection()
+        self.write(conn, "hello")
+        conn.sync()
+        put = self.spy(conn, "put_object")
+        self.read(conn)
+        self.assertFalse(conn.sync())
+        put.assert_not_called()
+
+    def test_sync_skipped_inside_transaction(self):
+        conn = self.make_connection()
+        self.write(conn, "committed")
+        conn.sync()
+
+        conn.set_autocommit(False)
+        self.write(conn, "uncommitted")
+        self.assertFalse(conn.sync())
+        conn.rollback()
+        conn.set_autocommit(True)
+        self.assertEqual(self.remote_rows(), ["committed"])
+
+    def test_sync_in_wal_mode(self):
+        conn = self.make_connection()
+        with conn.cursor() as cursor:
+            cursor.execute("PRAGMA journal_mode=wal")
+        self.write(conn, "hello")
+        self.assertTrue(conn.sync())
+        self.assertEqual(self.remote_rows(), ["hello"])
+        self.assertFalse(conn.sync())
+
+    def test_request_finished_syncs_open_connections(self):
+        conn = self.make_connection()
+        self.write(conn, "hello")
+        with mock.patch(
+            "django_sqlite_object_storage.base.connections.all",
+            return_value=[conn],
+        ):
+            request_finished.send(sender=None)
+        self.assertEqual(self.remote_rows(), ["hello"])
